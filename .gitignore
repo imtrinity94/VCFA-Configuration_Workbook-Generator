@@ -1,0 +1,11 @@
+# Collected output can contain customer infrastructure details - never commit it
+VM Apps - */
+All Apps - */
+Provider - */
+VCFA_*_Config_*.xlsx
+VCFA_*_Config_*.json
+~$*.xlsx
+
+# Credential files
+*.xml
+*cred*
