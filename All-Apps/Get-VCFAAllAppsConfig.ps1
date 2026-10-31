@@ -888,12 +888,12 @@ function Invoke-Collection {
     if (-not $SkipKubernetes) {
         Collect 'k8s'                  '/cci/kubernetes/apis/{group}/{version}/{resource}' -Script {
             $groups = Invoke-Vcfa '/cci/kubernetes/apis'
-            $projNames = @(@(Items $script:Raw.projectService) | ForEach-Object { "$($_.name)"; "$($_.name)".ToLowerInvariant() } | Where-Object { $_ } | Select-Object -Unique)
+            $projNames = @((Items $script:Raw.projectService) | ForEach-Object { "$($_.name)"; "$($_.name)".ToLowerInvariant() } | Where-Object { $_ } | Select-Object -Unique)
             foreach ($g in (Items (Get-P $groups 'groups'))) {
                 $gname = "$(Get-P $g 'name')"
                 if ($gname -notmatch '(?i)vmware') { continue }
                 $gv = Get-P $g 'preferredVersion.groupVersion'
-                if (-not $gv) { $gv = Get-P (@(Items (Get-P $g 'versions')) | Select-Object -First 1) 'groupVersion' }
+                if (-not $gv) { $gv = Get-P ((Items (Get-P $g 'versions')) | Select-Object -First 1) 'groupVersion' }
                 if (-not $gv) { continue }
                 try { $rl = Invoke-Vcfa "/cci/kubernetes/apis/$gv" }
                 catch { $script:Warnings.Add("${gv}: $(Get-ErrMsg $_)"); continue }
@@ -1297,7 +1297,7 @@ function Build-Workbook {
         return (Join-Lines @($z | Where-Object { $_ } | Select-Object -Unique))
     }
     $regObjs = @($regions)
-    if ($regObjs.Count -eq 0) { $regObjs = @(KindItems '(?i)^Region$' | ForEach-Object { [pscustomobject]@{ id = K8sName $_; name = K8sName $_; spec = Get-P $_ 'spec'; status = Get-P $_ 'status' } }) }
+    if ($regObjs.Count -eq 0) { $regObjs = @((KindItems '(?i)^Region$') | ForEach-Object { [pscustomobject]@{ id = K8sName $_; name = K8sName $_; spec = Get-P $_ 'spec'; status = Get-P $_ 'status' } }) }
     $rows = foreach ($r in $regObjs) {
         [ordered]@{
             'Name' = $r.name; 'Description' = Get-P $r 'description'
@@ -1661,7 +1661,7 @@ function Build-Workbook {
         if ($usedKinds.Contains($k) -or $k -match '(?i)^Region$') { continue }
         [ordered]@{
             'Kind' = $k; 'API' = Get-P $r 'groupVersion'; 'Resource' = Get-P $r 'resource'; 'Namespaced' = Get-P $r 'namespaced'
-            'Count' = @(Items (Get-P $r 'items')).Count
+            'Count' = (Items (Get-P $r 'items')).Count
             'Names' = Join-Lines @((Items (Get-P $r 'items')) | ForEach-Object { $ns = Get-P $_ 'metadata.namespace'; if ($ns) { "$ns/$(K8sName $_)" } else { K8sName $_ } })
             'Errors' = Join-Lines (Get-P $r 'errors')
         }

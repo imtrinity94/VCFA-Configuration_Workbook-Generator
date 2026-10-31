@@ -8,7 +8,7 @@ There is one generator per workbook type, each in its own folder with its own RE
 |---|---|---|---|
 | [`VM-Apps/`](VM-Apps/README.md) | `Get-VCFAVMAppsConfig.ps1` | One **VM Apps** organization: infrastructure, projects, network profiles, tags, onboarding, catalog and policies, Orchestrator endpoints | `VM Apps - <org>` |
 | [`All-Apps/`](All-Apps/README.md) | `Get-VCFAAllAppsConfig.ps1` | One **All Apps** organization: catalog, blueprints, VM images, content libraries, event subscriptions, projects, policies, regions, namespaces and classes, VPCs, transit gateways, IP management, access control, integrations, identity providers, secrets, configuration | `All Apps - <org>` |
-| `Provider/` | `Get-VCFAProviderConfig.ps1` | The **provider** (system) configuration | `Provider - <name>` |
+| [`Provider/`](Provider/README.md) | `Get-VCFAProviderConfig.ps1` | The **provider** (System organization): organizations with region quotas and networking, provider gateways, IP spaces, edge clusters, regions, supervisors, content libraries, general settings, vCenter / NSX / VCF instance connections, access control, identity providers, OIDC services, certificates, branding, feature flags | `Provider - <name>` (first label of the FQDN) |
 
 ## Shared behaviour
 
