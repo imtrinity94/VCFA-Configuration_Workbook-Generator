@@ -6,6 +6,9 @@ VCFA_*_Config_*.xlsx
 VCFA_*_Config_*.json
 ~$*.xlsx
 
+# Lab samples published on purpose
+!*/samples/*
+
 # Credential files
 *.xml
 *cred*
