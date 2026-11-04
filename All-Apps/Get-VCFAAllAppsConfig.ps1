@@ -99,7 +99,7 @@ $Preset = @{
 # =====================================================================================
 
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.0.2'
+$ScriptVersion = '1.0.3'
 Add-Type -AssemblyName System.IO.Compression
 if ($PSVersionTable.PSVersion.Major -lt 6) { Add-Type -AssemblyName System.IO.Compression.FileSystem }
 
@@ -854,6 +854,7 @@ function Invoke-Collection {
     $script:Conn.IaasApiVersion = Get-P $script:Raw.about 'latestApiVersion'
     if (-not $script:Conn.IaasApiVersion) { $script:Conn.IaasApiVersion = '2021-07-15' }
     Collect 'orgs'                     '/cloudapi/1.0.0/orgs'
+    Collect 'session'                  '/cloudapi/1.0.0/sessions/current' -Single -EmptyOn404
 
     # --- Build & Deploy
     Collect 'catalogSources'           '/catalog/api/admin/sources'
@@ -1062,16 +1063,23 @@ function Build-Workbook {
     foreach ($k in $nsK8s) { $nm = "$(K8sName $k)"; if (-not $nm) { continue }; if (-not $nsRecs.Contains($nm)) { $nsRecs[$nm] = @{ S = $null; K = $k } } else { $nsRecs[$nm].K = $k } }
     $nsRows = foreach ($nm in $nsRecs.Keys) {
         $s = $nsRecs[$nm].S; $k = $nsRecs[$nm].K
-        $proj = Get-P $s 'project.name', 'projectName', 'projectRef.name'; if (-not $proj) { $proj = Get-P $k 'metadata.namespace' }
+        $proj = Get-P $s 'projectAssignment.name', 'project.name', 'projectName', 'projectRef.name'; if (-not $proj) { $proj = Get-P $k 'metadata.namespace' }
         $status = Get-P $s 'status', 'phase', 'state'; if ($status -and -not ($status -is [string])) { $status = Format-Value $status }
         if (-not $status) { $status = K8sStatus $k }
         $cls = Get-P $s 'className', 'namespaceClassName', 'supervisorNamespaceClass.name', 'namespaceClass.name', 'classRef.name'
         if (-not $cls) { $cls = Get-P $k 'spec.className', 'spec.classRef.name' }
         if (-not $cls) { $cls = Find-Deep @($s, (Get-P $k 'spec')) '(?i)class(Name|Ref)?$' }
         $reg = Get-P $s 'region.name', 'regionName', 'regionRef.name'; if (-not $reg) { $reg = K8sRegion $k }
-        $vpc = Get-P $s 'vpc.name', 'vpcName', 'vpcRef.name'; if (-not $vpc) { $vpc = Get-P $k 'spec.vpcName', 'spec.vpc.name', 'spec.vpcRef.name' }
+        $vpc = Get-P $s 'virtualPrivateCloudName', 'vpc.name', 'vpcName', 'vpcRef.name'; if (-not $vpc) { $vpc = Get-P $k 'spec.vpcName', 'spec.vpc.name', 'spec.vpcRef.name' }
         if (-not $vpc) { $vpc = Find-Deep @($s, (Get-P $k 'spec')) '(?i)^vpc(Name|Ref)?$' }
-        $zon = Get-P $s 'zones', 'zoneNames'; if (-not $zon) { $zon = Get-P $k 'spec.zones', 'status.zones', 'spec.zoneNames' }
+        $zal = Items (Get-P $s 'zonalResourceAllocation')
+        $zon = if ($zal.Count) { @($zal | ForEach-Object { Get-P $_ 'zone.name', 'zone.id' }) } else { Get-P $s 'zones', 'zoneNames' }
+        if (-not $zon) { $zon = Get-P $k 'status.zones', 'spec.zones', 'spec.initialClassConfigOverrides.zones', 'spec.zoneNames' }
+        $alloc = if ($zal.Count) {
+            Join-Lines @($zal | ForEach-Object { '{0}: CPU limit {1} MHz, CPU reservation {2} MHz, memory limit {3} MiB, memory reservation {4} MiB' -f (Get-P $_ 'zone.name'), (Get-P $_ 'resourceAllocation.cpuLimitMHz'), (Get-P $_ 'resourceAllocation.cpuReservationMHz'), (Get-P $_ 'resourceAllocation.memoryLimitMiB'), (Get-P $_ 'resourceAllocation.memoryReservationMiB') })
+        } else {
+            Join-Lines @((Items (Get-P $k 'status.zones', 'spec.initialClassConfigOverrides.zones')) | ForEach-Object { '{0}: CPU limit {1}, CPU reservation {2}, memory limit {3}, memory reservation {4}' -f (Get-P $_ 'name'), (Get-P $_ 'cpuLimit'), (Get-P $_ 'cpuReservation'), (Get-P $_ 'memoryLimit'), (Get-P $_ 'memoryReservation') })
+        }
         [ordered]@{
             'Name'            = $nm
             'Project'         = $proj
@@ -1081,6 +1089,9 @@ function Build-Workbook {
             'Region'          = RegName $reg
             'VPC'             = if ($vpc -and -not ($vpc -is [string])) { Get-P $vpc 'name' } else { $vpc }
             'Zones'           = Get-NameList $zon
+            'Zone Resource Allocation' = $alloc
+            'Storage Classes' = Join-Lines @((Items (Get-P $k 'status.storageClasses', 'spec.initialClassConfigOverrides.storageClasses')) | ForEach-Object { '{0} (limit {1})' -f (Get-P $_ 'name'), (Get-P $_ 'limit') })
+            'VM Classes'      = Get-NameList (Get-P $k 'status.vmClasses', 'spec.initialClassConfigOverrides.vmClasses')
         }
     }
     $nsRows = @($nsRows)
@@ -1229,7 +1240,7 @@ function Build-Workbook {
     Add-Title $shPrj 'Projects' "Organization: $org"
     $rows = foreach ($p in $projects) {
         $n = 0
-        foreach ($role in 'administrators', 'members', 'viewers', 'supervisors', 'principals') { $n += (Items (Get-P $p $role)).Count }
+        foreach ($role in 'administrators', 'members', 'viewers', 'supervisors', 'users', 'auditors', 'advancedUsers', 'principals') { $n += (Items (Get-P $p $role)).Count }
         [ordered]@{
             'Name' = $p.name
             'Users & Groups' = $n
@@ -1242,7 +1253,7 @@ function Build-Workbook {
 
     $rows = [System.Collections.Generic.List[object]]::new()
     foreach ($p in $projects) {
-        foreach ($role in 'administrators', 'members', 'viewers', 'supervisors') {
+        foreach ($role in 'administrators', 'members', 'viewers', 'supervisors', 'users', 'auditors', 'advancedUsers') {
             foreach ($u in (Items (Get-P $p $role))) {
                 $rows.Add([ordered]@{ 'Project' = $p.name; 'Role' = $role.TrimEnd('s'); 'Type' = Get-P $u 'type'; 'Name' = Get-P $u 'email', 'name', 'id' })
             }
@@ -1385,35 +1396,71 @@ function Build-Workbook {
     $profiles = KindItems '(?i)connectivityprofile'
     $tgws     = KindItems '(?i)transitgateway$'
     $blocks   = KindItems '(?i)^ip(address)?blocks?$'
-    $quotas   = KindItems '(?i)^ip.*quota'
+    $quotas   = KindItems '(?i)^(ip.*quota|limit)$'        # 9.x: IP quotas are "Limit" objects (spec.quota)
+    $quotaSt  = KindItems '(?i)^limitstate$'
+    $attach   = KindItems '(?i)^vpcattachment$'
+    $lbs      = KindItems '(?i)^loadbalancer$'
+    $vpcSt    = KindItems '(?i)^vpclimitstate$'
     function Pick($o, [string]$Regex) {
         $v = Find-Deep @((Get-P $o 'spec'), (Get-P $o 'status')) $Regex
         if ($v -is [System.Collections.IDictionary] -or $v -is [System.Management.Automation.PSCustomObject]) { $n = Get-P $v 'name'; if ($n) { return $n } }
         return $v
     }
+    function StateOf($List, [string]$Name) {
+        # every field of the matching *State object except its metadata
+        $x = @($List) | Where-Object { "$(K8sName $_)" -eq $Name } | Select-Object -First 1
+        if (-not $x) { return '' }
+        $d = [ordered]@{}; foreach ($m in (Get-Members $x)) { if ($m.Name -notin 'metadata', 'kind', 'apiVersion', 'regionName') { $d[$m.Name] = $m.Value } }
+        return (Get-FlatMatch $d '.')
+    }
+    function QuotaUsage($Quota) {
+        # "single IPs used X of N, CIDRs (/24) used Y of M" from a quota { singleIPCIDRs, otherCIDRs, usage[] }
+        $u = (Items (Get-P $Quota 'usage')) | Select-Object -First 1
+        return ('single IPs used {0} of {1}, CIDRs ({2}) used {3} of {4}' -f (Get-P $u 'singleIPsConsumed'), (Get-P $Quota 'singleIPCIDRs'), (Get-P $Quota 'otherCIDRs.mask'), (Get-P $u 'cidrsConsumed'), (Get-P $Quota 'otherCIDRs.totalCount'))
+    }
+    function VpcQuota([string]$Name) {
+        $x = @($vpcSt) | Where-Object { "$(K8sName $_)" -eq $Name } | Select-Object -First 1
+        $l = Items (Get-P $x 'limitStateForVPCs')
+        if ($l.Count) { return (Join-Lines @($l | ForEach-Object { '{0}: {1}' -f (Get-P $_ 'limitName'), (QuotaUsage (Get-P $_ 'quota')) })) }
+        return (StateOf $vpcSt $Name)
+    }
     $profByName = @{}; foreach ($p in $profiles) { $profByName["$(K8sName $p)"] = $p }
+    # VPC -> connectivity profile: named on the VPC, or through its VPCAttachment
+    $vpcProf = @{}
+    foreach ($x in $attach) { $vn = "$(Get-P $x 'spec.vpcName')"; $pn = Get-P $x 'spec.vpcConnectivityProfileName', 'spec.connectivityProfileName'; if ($vn -and $pn) { $vpcProf[$vn] = "$pn" } }
+    function VpcProfile($v) { $p = Pick $v '(?i)connectivityProfile(Name|Ref)?$'; if (-not $p) { $p = $vpcProf["$(K8sName $v)"] }; return $p }
     function VpcTgw($v) {
         $t = Pick $v '(?i)^transitGateway(Name|Ref)?$'
-        if (-not $t) { $cp = "$(Pick $v '(?i)connectivityProfile(Name|Ref)?$')"; if ($cp -and $profByName.ContainsKey($cp)) { $t = Pick $profByName[$cp] '(?i)^transitGateway(Name|Ref)?$' } }
+        if (-not $t) { $cp = "$(VpcProfile $v)"; if ($cp -and $profByName.ContainsKey($cp)) { $t = Pick $profByName[$cp] '(?i)^transitGateway(Name|Ref)?$' } }
         return $t
     }
     function VpcsVia([string]$Name) {
-        # VPCs naming the object directly, or through a connectivity profile that names it
+        # VPCs naming the object directly, or attached to a connectivity profile that is / names it
         $out = @(Get-Refs $Name $vpcs)
-        foreach ($pn in @(Get-Refs $Name $profiles)) { $out += @(Get-Refs $pn $vpcs) }
+        $profs = @(Get-Refs $Name $profiles); if ($profByName.ContainsKey($Name)) { $profs += $Name }
+        foreach ($pn in $profs) {
+            $out += @(Get-Refs $pn $vpcs)
+            foreach ($vn in $vpcProf.Keys) { if ($vpcProf[$vn] -eq $pn) { $out += $vn } }
+        }
         return (Join-Lines @($out | Where-Object { $_ } | Select-Object -Unique))
+    }
+    function VpcLb([string]$Name) {
+        $l = @($lbs | Where-Object { "$(Get-P $_ 'spec.vpcName')" -eq $Name })
+        if ($l.Count) { return ('On ({0})' -f ((@($l | ForEach-Object { "$(K8sName $_) - $(K8sStatus $_)" })) -join ', ')) }
+        return ''
     }
 
     Add-Title $shVpc 'Virtual Private Clouds' "Organization: $org"
     $rows = foreach ($v in $vpcs) {
         $nm = "$(K8sName $v)"
+        $q = VpcQuota $nm; if (-not $q) { $q = Pick $v '(?i)quota' }
         [ordered]@{
             'Name' = $nm; 'Region' = K8sRegion $v
             'Transit Gateway' = VpcTgw $v
             'Private VPC IPv4 CIDRs' = Pick $v '(?i)^private(IPs|Ipv4Cidrs|IPv4CIDRs|Cidrs|IpBlocks?)$'
             'Default SNAT IP' = Pick $v '(?i)snat'
             'Namespaces' = NsWhere 'VPC' $nm
-            'IP quota status' = Pick $v '(?i)quota'
+            'IP quota status' = $q
             'Status' = K8sStatus $v
         }
     }
@@ -1426,7 +1473,8 @@ function Build-Workbook {
             'Transit Gateway' = Pick $p '(?i)^transitGateway(Name|Ref)?$'
             'External IPv4 blocks' = Pick $p '(?i)^external.*(block|cidr)'
             'Private VPC IPv4 CIDRs' = Pick $p '(?i)^private.*(block|cidr)'
-            'VPCs' = Join-Lines (Get-Refs $nm $vpcs)
+            'VPCs' = VpcsVia $nm
+            'Default' = Get-P $p 'spec.isDefault'
             'Spec (all fields)' = Get-P $p 'spec'
         }
     }
@@ -1434,15 +1482,17 @@ function Build-Workbook {
 
     $rows = foreach ($v in $vpcs) {
         $nm = "$(K8sName $v)"
+        $q = VpcQuota $nm; if (-not $q) { $q = Pick $v '(?i)quota' }
+        $lb = VpcLb $nm; if (-not $lb) { $lb = Pick $v '(?i)loadBalanc' }
         [ordered]@{
             'Name' = $nm; 'Region' = K8sRegion $v
             'Transit gateway' = VpcTgw $v
-            'Connectivity profile' = Pick $v '(?i)connectivityProfile(Name|Ref)?$'
+            'Connectivity profile' = VpcProfile $v
             'Private - VPC IPv4 CIDRs' = Pick $v '(?i)^private(IPs|Ipv4Cidrs|IPv4CIDRs|Cidrs|IpBlocks?)$'
             'Default SNAT IP' = Pick $v '(?i)snat'
-            'Load balancing' = Pick $v '(?i)loadBalanc'
+            'Load balancing' = $lb
             'Namespace' = NsWhere 'VPC' $nm
-            'IP quota status' = Pick $v '(?i)quota'
+            'IP quota status' = $q
             'Status' = K8sStatus $v
             'Description' = Get-P $v 'spec.description', 'metadata.annotations.description'
             'Health Status' = K8sConditions $v
@@ -1459,6 +1509,8 @@ function Build-Workbook {
             'Name' = $nm; 'Region' = K8sRegion $t
             'Connected VPCs' = VpcsVia $nm
             'Status' = K8sStatus $t
+            'Transit Subnets' = Get-P $t 'spec.transitSubnets'
+            'Default' = Get-P $t 'spec.isDefault'
             'Spec (all fields)' = Get-P $t 'spec'
         }
     }
@@ -1473,6 +1525,7 @@ function Build-Workbook {
             'VPCs' = VpcsVia $nm
             'Applicable quotas' = Join-Lines (Get-Refs $nm $quotas)
             'Connectivity Profiles' = Join-Lines (Get-Refs $nm $profiles)
+            'Status' = K8sStatus $b
             'Spec (all fields)' = Get-P $b 'spec'
         }
     }
@@ -1481,12 +1534,16 @@ function Build-Workbook {
         $nm = "$(K8sName $q)"
         [ordered]@{
             'Name' = $nm; 'Region' = K8sRegion $q
-            'Scope' = Pick $q '(?i)^(visibility|scope|type)$'
-            'IP blocks' = Pick $q '(?i)ipBlock'
-            'Number of single IPs' = Pick $q '(?i)single|ipCount|numberOfIps'
-            'Number of CIDRs' = Pick $q '(?i)cidrCount|numberOfCidrs|cidrs$'
-            'Max size of subnet' = Pick $q '(?i)maxSubnet|subnetSize|prefix'
-            'Associated with' = Join-Lines @(@(Get-Refs $nm $vpcs) + @(Get-Refs $nm $profiles))
+            'Scope' = Pick $q '(?i)^(ipBlockVisibility|visibility|scope)$'
+            'IP blocks' = Pick $q '(?i)^ipBlockNames?$'
+            'Number of single IPs' = Pick $q '(?i)^singleIP|ipCount|numberOfIps'
+            'Number of CIDRs' = Pick $q '(?i)^totalCount$|cidrCount|numberOfCidrs'
+            'Max size of subnet' = Pick $q '(?i)^mask$|maxSubnet|subnetSize'
+            'Associated with' = Join-Lines @(@(Get-Refs $nm $vpcs) + @(Get-Refs $nm $profiles) + @(@($vpcSt) | Where-Object { @((Items (Get-P $_ 'limitStateForVPCs')) | ForEach-Object { "$(Get-P $_ 'limitName')" }) -contains $nm } | ForEach-Object { "VPC $(K8sName $_)" }) | Select-Object -Unique)
+            'Usage' = $(
+                $st = @($quotaSt) | Where-Object { "$(K8sName $_)" -eq $nm } | Select-Object -First 1
+                if (Get-P $st 'quota.usage') { QuotaUsage (Get-P $st 'quota') } else { StateOf $quotaSt $nm }
+            )
             'Spec (all fields)' = Get-P $q 'spec'
         }
     }
@@ -1502,7 +1559,8 @@ function Build-Workbook {
             'User Name' = Get-P $u 'username', 'name'; 'Full Name' = Get-P $u 'fullName'; 'Email' = Get-P $u 'email'
             'State' = if ($null -eq $en) { '' } elseif ($en) { 'Enabled' } else { 'Disabled' }
             'Locked' = if ($null -eq $lk) { '' } elseif ($lk) { 'Locked' } else { 'Unlocked' }
-            'Effective Roles' = Join-Lines (@(Get-P $u 'roleEntityRefs') | ForEach-Object { Get-P $_ 'name' })
+            'Effective Roles' = Join-Lines (@(Get-P $u 'effectiveRoleEntityRefs', 'roleEntityRefs') | ForEach-Object { Get-P $_ 'name' })
+            'Assigned Roles' = Join-Lines (@(Get-P $u 'roleEntityRefs') | ForEach-Object { Get-P $_ 'name' })
             'Provider Type' = Get-P $u 'providerType'; 'Stranded' = Get-P $u 'stranded'
         }
     }
@@ -1704,6 +1762,8 @@ function Build-Workbook {
             'Collected at'     = $Data.meta.collectedAt
             'Collected by'     = $Data.meta.collectedBy
             'Login method'     = $Data.meta.auth
+            'Logged in as'     = Get-P $Src.session 'user.name'
+            'Roles of that user' = Join-Lines @(@(Get-P $Src.session 'roles') + @((Items (Get-P $Src.session 'roleRefs')) | ForEach-Object { Get-P $_ 'name' }) | Where-Object { $_ } | Select-Object -Unique)
             'IaaS API version' = $Data.meta.iaasApiVersion
             'Script version'   = $Data.meta.scriptVersion
             'Failed sections'  = if ($script:FailedKeys.Count) { $script:FailedKeys -join ', ' } else { 'none' }
