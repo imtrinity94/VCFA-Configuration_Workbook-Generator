@@ -86,7 +86,7 @@ $Preset = @{
 # =====================================================================================
 
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.0.0'
+$ScriptVersion = '1.0.1'
 $Organization = 'System'   # provider login always uses the System organization
 Add-Type -AssemblyName System.IO.Compression
 if ($PSVersionTable.PSVersion.Major -lt 6) { Add-Type -AssemblyName System.IO.Compression.FileSystem }
@@ -465,6 +465,9 @@ function Set-TlsOptions([bool]$Skip) {
     $proto = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     try { $proto = $proto -bor [Net.SecurityProtocolType]'Tls13' } catch { }
     [Net.ServicePointManager]::SecurityProtocol = $proto
+    # Windows PowerShell 5.1 adds "Expect: 100-continue" to POSTs with a body. The VCF Automation front end
+    # drops those connections ("The underlying connection was closed"), which breaks the API token login.
+    [Net.ServicePointManager]::Expect100Continue = $false
     if ($Skip) {
         if (-not ('VcfaTrustAllCerts' -as [type])) {
             Add-Type -TypeDefinition @"
@@ -652,7 +655,14 @@ function Connect-Vcfa {
             $sec = Read-Host -AsSecureString 'Provider API token'
             $script:ApiTokenPlain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
         }
-        $r = Invoke-RestMethod @WebOpts -Method Post -Uri "$base/oauth/provider/token" -Body @{ grant_type = 'refresh_token'; refresh_token = $script:ApiTokenPlain } -ContentType 'application/x-www-form-urlencoded' -Headers @{ Accept = 'application/json' }
+        $tokArgs = @{ Method = 'Post'; Uri = "$base/oauth/provider/token"; Body = @{ grant_type = 'refresh_token'; refresh_token = $script:ApiTokenPlain }; ContentType = 'application/x-www-form-urlencoded'; Headers = @{ Accept = 'application/json' } }
+        try { $r = Invoke-RestMethod @WebOpts @tokArgs }
+        catch {
+            if ((Get-StatusCode $_) -ne 0) { throw "API token login failed: $(Get-ErrMsg $_)" }
+            # connection dropped before any HTTP status: try once more on a fresh connection
+            try { $r = Invoke-RestMethod @WebOpts @tokArgs -DisableKeepAlive }
+            catch { throw "API token login failed (/oauth/provider/token): $(Get-ErrMsg $_)" }
+        }
         $script:AuthInfo = 'API token (/oauth/tenant)'
         return $r.access_token
     }
