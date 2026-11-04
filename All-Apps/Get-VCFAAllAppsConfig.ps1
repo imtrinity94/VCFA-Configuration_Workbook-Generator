@@ -99,7 +99,7 @@ $Preset = @{
 # =====================================================================================
 
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.0.1'
+$ScriptVersion = '1.0.2'
 Add-Type -AssemblyName System.IO.Compression
 if ($PSVersionTable.PSVersion.Major -lt 6) { Add-Type -AssemblyName System.IO.Compression.FileSystem }
 
@@ -857,7 +857,16 @@ function Invoke-Collection {
 
     # --- Build & Deploy
     Collect 'catalogSources'           '/catalog/api/admin/sources'
-    Collect 'catalogItems'             '/catalog/api/admin/items'
+    Collect 'catalogItems'             '/catalog/api/admin/items' -Script {
+        # The admin API needs catalog administrator rights. Without them (e.g. a service account token),
+        # fall back to the consumer API, which lists the items this account is entitled to.
+        try { Get-All '/catalog/api/admin/items' }
+        catch {
+            if ((Get-StatusCode $_) -ne 403) { throw }
+            $script:Warnings.Add('admin API forbidden for this account - used /catalog/api/items (only the items this account is entitled to)')
+            Get-All '/catalog/api/items'
+        }
+    }
     Collect 'blueprints'               '/blueprint/api/blueprints'
     Collect 'blueprintDetails'         '/blueprint/api/blueprints/{id}' -Script {
         $all = Items $script:Raw.blueprints; $n = 0
